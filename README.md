@@ -1,7 +1,33 @@
-This project is meant to be an analysis of various models' perforances on a unique dataset, as well as show some data visualization of these performances.
-The project uses training methods such as RandomForest, Neural Networks, LogisticRegression, GradientBoosting, and Support Vector Machine to train a model to predict the result of a person's life expectancy
-using both numerical and categorical data. 
-To run this project:
-1) Be sure you import the necessary libraries (pandas, scikit-learn, matplotlib, seaborn, tensorflow, and numpy)
-2) Break the file into blocks by its headers for easier readibility
-3) Run each block individually to see how each model performs
+# Life Expectancy Predictor
+
+An analysis on the performance and optimization of various classification ML models.  
+This project implements each of them, using several optimized parameters to predict someone's life expectancy (or if they will live for 2+ years) based on their current health and habits.  
+
+Attached are both a Python file and an identical Jupyter Notebook, as well as the training and testing CSV file for it.
+
+---
+
+## Running
+
+### Prerequisites
+- Python 3.x
+
+### Installing Libraries
+To run this project, you will need the following libraries:  
+- pandas  
+- scikit-learn  
+- matplotlib  
+- seaborn  
+- tensorflow  
+- numpy  
+
+To install all of these at once, run the following command:
+
+```bash
+pip install pandas scikit-learn matplotlib seaborn tensorflow numpy
+```
+If this does not work, try making sure you have pip installed, or using pip3 instead
+
+### Testing code individually 
+Use the Jupyter Notebook to run cells individually, allowing to see how each individual model performs at a time.<br>
+IMPORTANT: Be sure to restart the Kernal before testing other models, to ensure that they are not being fit on previous models beforehand

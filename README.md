@@ -9,25 +9,34 @@ Attached are both a Python file and an identical Jupyter Notebook, as well as th
 
 ## Running
 
-### Prerequisites
-- Python 3.x
+### Installing Dependencies
+This project uses Nodejs
 
-### Installing Libraries
-To run this project, you will need the following libraries:  
-- pandas  
-- scikit-learn  
-- matplotlib  
-- seaborn  
-- tensorflow  
-- numpy  
+Clone the repository and begin intalling dependencies.
 
-To install all of these at once, run the following command:
-
+Both the frontend and backend can have then dependencies installed by running:
 ```bash
-pip install pandas scikit-learn matplotlib seaborn tensorflow numpy
+npm install
 ```
-If this does not work, try making sure you have pip installed, or using pip3 instead
+If this does not work, try making sure you have node installed/the right version
 
-### Testing code individually 
-Use the Jupyter Notebook to run cells individually, allowing to see how each individual model performs at a time.<br>
-IMPORTANT: Be sure to restart the Kernal before testing other models, to ensure that they are not being fit on previous models beforehand
+### MongoDB Configuration
+This project uses a MongoDB database. To appropriately set up a connetion for the database follow these steps:
+<ol>
+  <li>Make sure you have MongoDB installed</li>
+  <li>Sign into MongoDB Atlas and create a new cluster</li>
+  <li>This will allow you to then create a new MongoDB database</li>
+  <li>Get a connection string and add that in your backend .env file</li>
+</ol>
+
+### Authentication
+Create a random string for the JWT authentication, as well as the cookies secret
+
+### OpenAI Integration
+This project uses the OpenAI API for chat integration. In order to use the OpenAI API, you will need to use your own personal OpenAI Secret Key
+
+### End
+After all of this is over, just go into both the frontend and backend and run:
+```bash
+npm start
+```

@@ -13,21 +13,35 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, StratifiedKFold
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score, roc_auc_score
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import BinaryCrossentropy
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+import keras_tuner as kt
+
+import xgboost as xgb
+
 from scipy.stats import randint
 
 # Load dataset
-dataset = pd.read_csv('Religious_Practice_Survival_Data.csv')
-dataset['died_2_year'] = dataset['died_2_year'].replace({'Yes': 1, 'No': 0})
+dataset = pd.read_csv('Survival_Data.csv')
 
 #Drop undesired features
-dataset = dataset.drop(['agecat', 'hospitalstay_days'], axis = 1)
+dataset = dataset.drop(['studyid', 'site', 'strength_comfort_religion', 'petition_prayer_health', 'intercessory_prayers_health'], axis = 1)
 
 # Separate the dataset into numerical and categorical features
-numerical_features = dataset.select_dtypes(include=['int64', 'float64']).columns
-categorical_features = dataset.select_dtypes(exclude=['int64', 'float64']).columns
+numerical_features = dataset.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = dataset.select_dtypes(exclude=['int64', 'float64']).columns.tolist()
+
 
 # Use median imputation on the numerical features for missing values
 dataset[numerical_features] = dataset[numerical_features].fillna(dataset[numerical_features].median())
@@ -36,186 +50,323 @@ dataset[numerical_features] = dataset[numerical_features].fillna(dataset[numeric
 for col in categorical_features:
     dataset[col] = dataset[col].fillna(dataset[col].mode().iloc[0])
 
-# One-hot encode categorical features
-encoder = OneHotEncoder(drop='first', sparse=False)  # Drop first category to avoid dummy variable trap
-encoded_categorical = encoder.fit_transform(dataset[categorical_features])
-# Create DataFrame from encoded categorical features
-encoded_categorical_df = pd.DataFrame(encoded_categorical, columns=encoder.get_feature_names_out(categorical_features))
 
-# Combine numerical and encoded categorical features into X
-X = pd.concat([dataset[numerical_features], encoded_categorical_df], axis=1)
-# Define target variable y
+# Convert binary categorical variables ('Yes'/'No') into 1/0
+binary_columns = [col for col in categorical_features if dataset[col].nunique() == 2]
+for col in binary_columns:
+    unique_values = dataset[col].unique()
+    if set(unique_values) == {'Yes', 'No'}:
+        dataset[col] = dataset[col].replace({'Yes': 1, 'No': 0})
+    elif set(unique_values) == {'Not impaired', 'Impaired'}:
+        dataset[col] = dataset[col].replace({'Impaired': 1, 'Not impaired': 0})
+    else:
+        mapping = {unique_values[0]: 1, unique_values[1]: 0}
+        dataset[col] = dataset[col].map(mapping)
+
+
+# Remaining categorical variables (multi-category)
+multi_category_columns = [col for col in categorical_features if col not in binary_columns]
+
+
+# One-hot encode categorical variables
+encoder = OneHotEncoder(drop='first', sparse_output=False)
+encoded_categorical = encoder.fit_transform(dataset[multi_category_columns])
+encoded_categorical_df = pd.DataFrame(encoded_categorical, columns=encoder.get_feature_names_out(multi_category_columns))
+
+
+# Drop original categorical columns and merge encoded ones
+dataset = dataset.drop(multi_category_columns, axis=1)
+dataset = pd.concat([dataset, encoded_categorical_df], axis=1)
+
+dataset = dataset.rename(columns={
+    'agecat_>=55-<65': 'agecat_55_to_65',
+    'agecat_>=65': 'agecat_65_plus'
+})
+
+
+# Separate features and target
+X = dataset.drop('died_2_year', axis=1)
 y = dataset['died_2_year']
 
-"""RandomForest Classifier and Metric Evaluation"""
 
-# Split data into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Scale numerical features
+scaler = StandardScaler()
+X[numerical_features] = scaler.fit_transform(X[numerical_features])
+
+
+# Split into Train (80%), Validation (10%), and Test (10%)
+X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.2, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, random_state=42)
+
 
 param_dist = {
-    'n_estimators': randint(50,100),
-    'max_depth': randint(3,7),
-    'min_samples_leaf': randint(5,20),
-    'min_samples_split': randint(5,20),
+    'n_estimators': randint(50, 100),
+    'max_depth': randint(3, 7),
+    'min_samples_leaf': randint(5, 20),
+    'min_samples_split': randint(5, 20),
 }
 
-random_search = RandomizedSearchCV(estimator=RandomForestClassifier(random_state=42),
-                                   param_distributions=param_dist,
-                                   n_iter=20,  # Number of parameter settings that are sampled
-                                   cv=5,
-                                   random_state=42,
-                                   scoring='accuracy',
-                                   n_jobs=-1)
+random_search = RandomizedSearchCV(
+    estimator=RandomForestClassifier(random_state=42),
+    param_distributions=param_dist,
+    n_iter=20,
+    cv=5,
+    random_state=42,
+    scoring='accuracy',
+    n_jobs=-1
+)
 
+# Fit model
 random_search.fit(X_train, y_train)
-best_params = random_search.best_params_
-print("Best parameters: ", best_params)
-best_rfc = random_search.best_estimator_
-best_rfc.fit(X_train, y_train)
 
-# Obtain accuracy
+# Get best model based on the params
+best_rfc = random_search.best_estimator_
+
+# Evaluate model
 train_score = np.mean(cross_val_score(best_rfc, X_train, y_train, cv=5))
+val_score = best_rfc.score(X_val, y_val)
 test_score = best_rfc.score(X_test, y_test)
+
+# Output results
+print("Best Parameters:", random_search.best_params_)
 print("Train Score:", train_score)
+print("Validation Score:", val_score)
 print("Test Score:", test_score)
 
-from sklearn.metrics import classification_report
 
 y_pred = best_rfc.predict(X_test)
-print(classification_report(y_test, y_pred, digits = 5))
+report = classification_report(y_test, y_pred)
+print("Classification Report:\n", report)
 
-"""Evaluation Visualization"""
 
-#Displays a bar plot of any desired input in the column
-def target_dist(df, colname):
-  if colname not in df.columns:
-    print("Column did not exist in DataFrame")
-    return
-  values = df[colname].value_counts()
-  #Plot it
-  plt.figure()
-  values.plot(kind='bar')
-  plt.title(f"Distribution of {colname}")
-  plt.xlabel(colname)
-  plt.ylabel("Count")
-  plt.show()
+X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.2, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, random_state=42)
 
-target_dist(dataset, 'education')
 
-#Display a feature importance of each column in predicting y
-feature_importance = best_rfc.feature_importances_
-feature_names = X_train.columns
+# Build Complex Neural Network Model
+def build_model():
+    model = Sequential()
+    
+    # Input Layer
+    model.add(Dense(512, input_shape=(X_train.shape[1],), activation='relu'))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.3))
+    
+    # Hidden Layers
+    model.add(Dense(256, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.3))
+    
+    model.add(Dense(128, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.3))
+    
+    model.add(Dense(64, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(Dropout(0.3))
+    
+    # Output Layer
+    model.add(Dense(1, activation='sigmoid'))
+    
+    # Compile Model
+    optimizer = Adam(learning_rate=0.001)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    
+    return model
 
-#Plot
-plt.figure(figsize=(15,15))
-plt.barh(feature_names, feature_importance)
-plt.title("Feature Importances")
-plt.xlabel("Importance")
-plt.ylabel("Feature")
+
+# Instantiate Model
+model = build_model()
+
+history = model.fit(
+    X_train, y_train, 
+    epochs=100, 
+    batch_size=32,
+    validation_data=(X_val, y_val),
+    callbacks=[
+        EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, verbose=1)
+    ],
+    verbose=1
+)
+
+
+# Evaluate Model
+test_loss, test_acc = model.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_acc:.4f}")
+
+
+# Plot Loss Curve
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['loss'], label='Train Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Training vs Validation Loss')
+plt.legend()
+
+# Plot Accuracy Curve
+plt.subplot(1, 2, 2)
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.title('Training vs Validation Accuracy')
+plt.legend()
+
 plt.show()
 
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-#Create the confusion matrix
+
+# Predict on test set
+y_pred = (model.predict(X_test) > 0.5).astype(int)
+
+# Compute confusion matrix
 cm = confusion_matrix(y_test, y_pred)
 disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-disp.plot()
-plt.title("Confusion matrix")
+disp.plot(cmap='Blues')
+plt.title('Confusion Matrix')
 plt.show()
 
-from sklearn.metrics import roc_curve, roc_auc_score
-#Create ROC Curve
-y_proba = best_rfc.predict_proba(X_test)[:,1]
-fpr, tpr, thresholds = roc_curve(y_test, y_proba)
-roc_auc = roc_auc_score(y_test, y_proba)
 
-plt.figure()
-plt.plot(fpr, tpr, label=f'AUC={roc_auc:.2f}')
-plt.plot([0,1],[0,1], 'k--') #Diagonal line
-plt.title('ROC Curve')
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.legend(loc='best')
-plt.show()
+X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, stratify=y_rest, random_state=42)
 
-"""Comparing Different Models
 
-Neural Networks
-"""
+base_model = xgb.XGBClassifier(random_state=42, eval_metric="logloss", use_label_encoder=False)
 
-import tensorflow as tf
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state = 42)
-model = tf.keras.models.Sequential()
-model.add(tf.keras.layers.Dense(256, input_shape=X_train.shape[1:], activation = 'sigmoid'))
-model.add(tf.keras.layers.Dense(256, activation='sigmoid'))
-model.add(tf.keras.layers.Dense(1, activation='sigmoid'))
-
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-
-model.fit(X_train, y_train, epochs=100)
-
-model.evaluate(X_test, y_test)
-
-"""Gradient Boosting Machine"""
-
-import xgboost as xgb
-from sklearn.metrics import accuracy_score
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state = 42)
-
-model = xgb.XGBClassifier(random_state=42)
-#Initialize XGBoost Classifier
+# Define Parameter Grid
 param_grid = {
-    'n_estimators': [50, 100],  # Number of boosting rounds (trees)
-    'max_depth': [3, 5, 7],            # Maximum depth of each tree
-    'learning_rate': [0.01, 0.1, 0.3], # Step size shrinkage
-    'subsample': [0.6, 0.8, 1.0],      # Fraction of samples used for training each tree
-    'colsample_bytree': [0.6, 0.8, 1.0],# Fraction of features used for training each tree
-    'reg_alpha': [0.1, 0.5],    # L1 regularization term
-    'reg_lambda': [0.1, 0.5]    # L2 regularization term
+    'n_estimators': [50, 100],  
+    'max_depth': [3, 5, 7],            
+    'learning_rate': [0.01, 0.1, 0.3], 
+    'subsample': [0.6, 0.8, 1.0],      
+    'colsample_bytree': [0.6, 0.8, 1.0],
+    'reg_alpha': [0.1, 0.5],    
+    'reg_lambda': [0.1, 0.5]    
 }
 
-# Initialize RandomizedSearchCV
-random_search = RandomizedSearchCV(model, param_distributions=param_grid, n_iter=20,
-                                   scoring='accuracy', cv=5, verbose=1, random_state=42)
-#Perform search
-random_search.fit(X_train, y_train)
+# Grid Search with StratifiedKFold (5 Folds)
+grid_search = GridSearchCV(
+    base_model, param_grid,
+    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+    scoring='accuracy', n_jobs=-1, verbose=2
+)
 
-#Print out results
-print("Best parameters: ", random_search.best_params_)
-print("Best score: ", random_search.best_score_)
+# Perform Grid Search
+grid_search.fit(X_train, y_train)
 
-#Get the best_estimators
-best_gbm = random_search.best_estimator_
-
-#Make predictions
-y_pred = best_gbm.predict(X_test)
-gbm_accuracy = accuracy_score(y_test, y_pred)
-print("GBM Accuracy:", gbm_accuracy)
-
-"""Logistic Regression"""
-
-from sklearn.linear_model import LogisticRegression
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 42)
-
-lr = LogisticRegression(C=3, penalty = 'l2', solver = 'liblinear', max_iter = 200)
-
-lr.fit(X_train, y_train)
-
-y_pred = lr.predict(X_test)
-lr_accuracy = accuracy_score(y_test, y_pred)
-print("Accuracy: {:.5f}".format(lr_accuracy))
-
-"""Support Vector Machine"""
-
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 42)
-
-svc = SVC(C = 1, kernel = 'linear', gamma = 'scale', verbose = 1, random_state=42)
-
-svc.fit(X_train, y_train)
+# Print Best Parameters & Score
+print("Best Parameters:", grid_search.best_params_)
+print("Best Cross-Validation Accuracy:", grid_search.best_score_)
 
 
-y_pred = svc.predict(X_test)
-svc_accuracy = accuracy_score(y_test, y_pred)
-print("Accuracy: ", svc_accuracy)
+# Convert Data to DMatrix
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dval = xgb.DMatrix(X_val, label=y_val)
+dtest = xgb.DMatrix(X_test, label=y_test)
+
+# Train Best Model with Early Stopping
+params = grid_search.best_params_
+params.update({'objective': 'binary:logistic', 'eval_metric': 'logloss', 'random_state': 42})
+
+evals = [(dtrain, 'train'), (dval, 'val')]
+best_xgb = xgb.train(
+    params, dtrain,
+    num_boost_round=1000,  # Large number, but early stopping will stop it earlier
+    evals=evals,
+    early_stopping_rounds=10,  # Stop if no improvement after 10 rounds
+    verbose_eval=True
+)
+
+# Make Predictions
+y_pred = (best_xgb.predict(dtest) > 0.5).astype(int)  # Convert probabilities to 0/1
+y_pred_proba = best_xgb.predict(dtest)
+
+# Evaluate
+test_acc = accuracy_score(y_test, y_pred)
+print(f"Test Accuracy: {test_acc:.4f}")
+
+
+X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, stratify=y_rest, random_state=42)
+
+param_grid = {
+    'C': [0.1, 1, 3, 5, 10],         # Regularization Strength
+    'solver': ['liblinear', 'lbfgs'],  # Solver choice
+    'max_iter': [100, 200, 500]        # Iteration limits
+}
+
+# Initialize Base Model
+base_model = LogisticRegression(penalty='l2', random_state=42)
+
+# Grid Search with Stratified 5-Fold Cross Validation
+grid_search = GridSearchCV(
+    base_model, param_grid,
+    cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+    scoring='accuracy', n_jobs=-1, verbose=2
+)
+grid_search.fit(X_train, y_train)
+
+# Print Best Parameters & Score
+print("Best Parameters:", grid_search.best_params_)
+print("Best Cross-Validation Accuracy:", grid_search.best_score_)
+
+
+# Train Best Model on Full Training Data
+best_lr = grid_search.best_estimator_
+best_lr.fit(X_train, y_train)
+
+# Evaluate on Validation Set
+val_pred = best_lr.predict(X_val)
+val_acc = accuracy_score(y_val, val_pred)
+print(f"Validation Accuracy: {val_acc:.4f}")
+
+# Evaluate on Test Set
+test_pred = best_lr.predict(X_test)
+test_acc = accuracy_score(y_test, test_pred)
+print(f"Test Accuracy: {test_acc:.4f}")
+
+# Detailed Classification Report
+print("\nClassification Report:\n", classification_report(y_test, test_pred))
+
+
+X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, stratify=y_rest, random_state=42)
+
+
+# Define SVC model
+svc = SVC(random_state=42)
+
+# Hyperparameter tuning using GridSearchCV
+param_grid = {
+    'C': [0.1, 1, 10], 
+    'kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
+    'gamma': ['scale', 'auto']
+}
+
+grid_search = GridSearchCV(svc, param_grid, cv=StratifiedKFold(n_splits=5), scoring='accuracy', verbose=1, n_jobs=-1)
+grid_search.fit(X_train, y_train)
+
+# Best model from Grid Search
+best_svc = grid_search.best_estimator_
+
+# Train Best Model on Training Data
+best_svc.fit(X_train, y_train)
+
+# Evaluate on Validation Set
+y_val_pred = best_svc.predict(X_val)
+val_accuracy = accuracy_score(y_val, y_val_pred)
+print(f"Validation Accuracy: {val_accuracy:.5f}")
+
+# Final Test Evaluation
+y_test_pred = best_svc.predict(X_test)
+test_accuracy = accuracy_score(y_test, y_test_pred)
+print(f"Test Accuracy: {test_accuracy:.5f}")
+
+# Classification Report
+print("\nClassification Report:")
+print(classification_report(y_test, y_test_pred))
+
+
